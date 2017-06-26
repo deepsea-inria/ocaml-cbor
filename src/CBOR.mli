@@ -12,6 +12,7 @@ type t =
 | `Int of int
 | `Float of float
 | `Bytes of string
+| `Link of string
 | `Text of string
 | `Array of t list
 | `Map of (t * t) list

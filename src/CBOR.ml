@@ -66,10 +66,44 @@ type t =
 | `Int of int
 | `Float of float
 | `Bytes of string
+| `Link of string
 | `Text of string
 | `Array of t list
 | `Map of (t * t) list
 ]
+
+let base = 58
+let big_base = Big_int.big_int_of_int 58
+let bitcoin_alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+
+(* decode a string return either an Int or Big_int *)
+let decode_hash (str : string) = 
+  let result = ref Big_int.zero_big_int in
+  for i = 0 to ((String.length str) - 1) do
+    try
+      let index = Big_int.big_int_of_int (String.index bitcoin_alphabet str.[i]) in
+      result := Big_int.add_big_int (Big_int.mult_big_int !result big_base) index
+    with _ ->
+      fail ""
+        (*("The passed value "^ str ^" is not base58")*)
+  done; 
+  !result
+
+let hex_of_big_int bi =
+  let rec f bi r =
+    if Big_int.eq_big_int bi (Big_int.big_int_of_int 0) then
+      let n = List.length r in
+      (* to make first byte of result the zero byte  *)
+      let res = Bytes.make (n + 1) (char_of_int 0) in
+      List.iteri (fun i c -> Bytes.set res (i + 1) (char_of_int c)) r;
+      res
+    else
+      let bi' = Big_int.shift_right_big_int bi 8 in
+      let bi'' = Big_int.and_big_int bi (Big_int.big_int_of_int 0xff) in
+      let i = Big_int.int_of_big_int bi'' in
+      f bi' (i :: r)
+  in
+  f bi []
 
 let encode item =
   let open Encode in
@@ -84,6 +118,11 @@ let encode item =
   | `Int n -> int b n
   | `Float f -> init b ~maj:7 27; put_n b 8 BE.set_double f
   | `Bytes s -> put b ~maj:2 (String.length s); Buffer.add_string b s
+  | `Link s ->
+     (* drop leading "z" in bitcoin-style address s *)
+     let s = String.sub s 1 (String.length s - 1) in
+     let l = hex_of_big_int (decode_hash s) in
+     put b ~maj:6 42; write (`Bytes l)
   | `Text s -> put b ~maj:3 (String.length s); Buffer.add_string b s
   | `Array l -> put b ~maj:4 (List.length l); List.iter write l
   | `Map m -> put b ~maj:5 (List.length m); List.iter (fun (a,b) -> write a; write b) m
@@ -120,6 +159,7 @@ let extract_number byte1 r =
     let n = get_n r 8 BE.get_int64 in
     if n > int64_max_int || n < 0L then fail "extract_number: %Lu" n;
     Int64.to_int n
+  | 42 -> 42
   | n -> fail "bad additional %d" n
 
 let get_float16 s i =
@@ -162,7 +202,14 @@ and extract r =
   | 3 -> `Text (extract_string byte1 r (function `Text s -> s | _ -> fail "extract: not a text chunk"))
   | 4 -> `Array (extract_list byte1 r extract)
   | 5 -> `Map (extract_list byte1 r extract_pair)
-  | 6 -> let _tag = extract_number byte1 r in extract r
+  | 6 ->
+     let tag = extract_number byte1 r in
+     begin
+       assert (tag = 42);
+       match extract r with
+       | `Bytes s -> `Link s
+       | _ -> fail "extract link"
+     end
   | 7 ->
     begin match get_additional byte1 with
     | n when n < 20 -> `Simple n
@@ -202,6 +249,7 @@ let to_diagnostic item =
     | FP_zero | FP_normal | FP_subnormal -> bprintf b "%g" f
     end
   | `Bytes s -> bprintf b "h'%s'" (Encode.to_hex s)
+  | `Link s -> bprintf b "h'%s'" (Encode.to_hex s)
   | `Text s -> bprintf b "\"%s\"" s
   | `Array l ->
     put "[";
